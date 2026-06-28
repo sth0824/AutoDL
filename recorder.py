@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
+from typing import Optional
 
 import downloader  # find_ffmpeg 재사용
 
@@ -113,3 +116,179 @@ class RegionRecorder:
     def failed_early(self) -> bool:
         """시작 직후 ffmpeg가 0이 아닌 코드로 죽었는지(영역 오류 등)."""
         return self._proc is not None and (self._proc.poll() or 0) != 0
+
+
+def _start_ffmpeg_rawvideo(ff: str, width: int, height: int, fps: int, out: str):
+    """BGRA 원시 프레임을 stdin으로 받아 H.264 MP4로 인코딩하는 ffmpeg 시작."""
+    cmd = [
+        ff, "-hide_banner", "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgra",
+        "-s", f"{width}x{height}",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        out,
+    ]
+    return subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=_CREATE_NO_WINDOW,
+    )
+
+
+class WindowRecorder:
+    """특정 창을 Windows Graphics Capture(WGC)로 녹화한다.
+
+    다른 창이 위를 덮거나 다른 앱으로 전환해도 그 창의 내용만 캡처된다.
+    crop이 주어지면 창 기준 (left, top, width, height) 영역만 잘라 녹화한다.
+
+    프레임은 변화가 있을 때만 도착하므로, 별도 writer 스레드가 '가장 최근
+    프레임'을 고정 FPS로 ffmpeg에 흘려보내 재생 길이를 정확히 맞춘다.
+    """
+
+    def __init__(
+        self,
+        hwnd: int,
+        output_path: str,
+        fps: int = 30,
+        crop: Optional[tuple[int, int, int, int]] = None,
+    ):
+        self.hwnd = hwnd
+        self.output_path = output_path
+        self.fps = fps
+        self.crop = crop
+
+        self._cap = None
+        self._control = None
+        self._proc: subprocess.Popen | None = None
+        self._writer: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._latest: bytes | None = None
+        self._out_size: tuple[int, int] | None = None
+        self._stop = False
+        self.error: str | None = None
+
+    @property
+    def is_recording(self) -> bool:
+        return self._control is not None and not self._stop
+
+    # ---- WGC 콜백 ----
+    def _on_frame(self, frame, _ctrl) -> None:
+        try:
+            import cv2  # 크기 변화 시 리사이즈용
+            buf = frame.frame_buffer  # (h, w, 4) BGRA
+            fh, fw = buf.shape[0], buf.shape[1]
+
+            if self.crop:
+                l, t, w, h = self.crop
+                l = max(0, min(l, fw - 2))
+                t = max(0, min(t, fh - 2))
+                w = min(w, fw - l)
+                h = min(h, fh - t)
+                w -= w % 2
+                h -= h % 2
+                buf = buf[t:t + h, l:l + w]
+            else:
+                h = fh - fh % 2
+                w = fw - fw % 2
+                buf = buf[:h, :w]
+
+            if w < 2 or h < 2:
+                return
+
+            with self._lock:
+                if self._out_size is None:
+                    self._out_size = (w, h)
+                ow, oh = self._out_size
+                if (w, h) != (ow, oh):
+                    # 창 크기가 바뀌면 첫 크기에 맞춰 리사이즈(인코더 입력 고정).
+                    buf = cv2.resize(buf, (ow, oh))
+                self._latest = bytes(buf.tobytes())
+        except Exception as e:  # noqa: BLE001
+            self.error = f"{type(e).__name__}: {e}"
+
+    def _on_closed(self) -> None:
+        pass
+
+    # ---- writer 스레드 ----
+    def _writer_loop(self) -> None:
+        interval = 1.0 / self.fps
+        next_t = time.perf_counter()
+        while not self._stop:
+            with self._lock:
+                data = self._latest
+            if data and self._proc and self._proc.stdin:
+                try:
+                    self._proc.stdin.write(data)
+                except (OSError, ValueError):
+                    break
+            next_t += interval
+            delay = next_t - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_t = time.perf_counter()
+
+    # ---- 제어 ----
+    def start(self) -> None:
+        ff = downloader.find_ffmpeg()
+        if not ff:
+            raise RuntimeError("ffmpeg를 찾을 수 없습니다.")
+        import windows_capture as wc
+
+        self._cap = wc.WindowsCapture(
+            cursor_capture=True,
+            draw_border=False,
+            window_hwnd=self.hwnd,
+        )
+        # event()는 함수 __name__으로 분기하므로 핸들러를 직접 지정한다.
+        self._cap.frame_handler = self._on_frame
+        self._cap.closed_handler = self._on_closed
+        self._control = self._cap.start_free_threaded()
+
+        # 첫 프레임으로 출력 크기를 확정할 때까지 잠깐 대기
+        t0 = time.perf_counter()
+        while self._out_size is None and time.perf_counter() - t0 < 4.0:
+            if self.error:
+                break
+            time.sleep(0.03)
+        if self._out_size is None:
+            self.stop()
+            raise RuntimeError(
+                "창 프레임을 받지 못했습니다. (최소화되어 있거나 캡처 불가한 창)"
+            )
+
+        os.makedirs(os.path.dirname(os.path.abspath(self.output_path)), exist_ok=True)
+        w, h = self._out_size
+        self._proc = _start_ffmpeg_rawvideo(ff, w, h, self.fps, self.output_path)
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True)
+        self._writer.start()
+
+    def stop(self, timeout: float = 10.0) -> None:
+        self._stop = True
+        if self._control is not None:
+            try:
+                self._control.stop()
+            except Exception:
+                pass
+            self._control = None
+        if self._writer:
+            self._writer.join(timeout=2)
+            self._writer = None
+        if self._proc:
+            try:
+                if self._proc.stdin:
+                    self._proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self._proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._proc.terminate()
+            self._proc = None

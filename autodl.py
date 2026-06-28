@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import downloader
 import recorder
+import winutil
 
 
 def default_download_dir() -> str:
@@ -105,19 +106,29 @@ class AutoDLApp:
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._downloading = False
 
-        # 녹화 상태
+        # 영역 녹화 상태
         self._recorder: recorder.RegionRecorder | None = None
         self._region: recorder.Region | None = None
+
+        # 창 녹화 상태
+        self._win_recorder: recorder.WindowRecorder | None = None
+        self._win_list: list[winutil.WindowInfo] = []
+        self._win_hwnd: int | None = None
+        self._win_crop: tuple[int, int, int, int] | None = None
+        self._win_out: str = ""
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         self._dl_tab = ttk.Frame(nb)
         self._rec_tab = ttk.Frame(nb)
+        self._win_tab = ttk.Frame(nb)
         nb.add(self._dl_tab, text="  ⬇ 다운로드  ")
-        nb.add(self._rec_tab, text="  ● 화면 녹화  ")
+        nb.add(self._rec_tab, text="  ● 화면 영역  ")
+        nb.add(self._win_tab, text="  ● 창 녹화  ")
 
         self._build_download_tab(self._dl_tab)
         self._build_record_tab(self._rec_tab)
+        self._build_window_tab(self._win_tab)
         self._poll_events()
 
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -229,6 +240,179 @@ class AutoDLApp:
             messagebox.showwarning(
                 "ffmpeg 필요", "화면 녹화에는 ffmpeg가 필요합니다."
             )
+
+    # ---------- 창 녹화 탭 ----------
+    def _build_window_tab(self, frm: ttk.Frame) -> None:
+        pad = {"padx": 12, "pady": 6}
+
+        info = (
+            "특정 창을 녹화합니다. 다른 창이 위를 덮거나 다른 앱으로 전환해도\n"
+            "그 창의 내용만 계속 녹화됩니다. (최소화하면 멈춤 · 영상만, 소리 없음)"
+        )
+        ttk.Label(frm, text=info, justify="left").pack(anchor="w", **pad)
+
+        ttk.Label(frm, text="녹화할 창").pack(anchor="w", **pad)
+        win_row = ttk.Frame(frm)
+        win_row.pack(fill="x", padx=12)
+        self.win_var = tk.StringVar()
+        self.win_combo = ttk.Combobox(
+            win_row, textvariable=self.win_var, state="readonly"
+        )
+        self.win_combo.pack(side="left", fill="x", expand=True)
+        self.win_combo.bind("<<ComboboxSelected>>", self._on_win_selected)
+        ttk.Button(win_row, text="새로고침", command=self._refresh_windows).pack(
+            side="left", padx=(6, 0)
+        )
+
+        crop_row = ttk.Frame(frm)
+        crop_row.pack(fill="x", padx=12, pady=(10, 0))
+        self.win_crop_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            crop_row, text="창의 일부만 녹화", variable=self.win_crop_var,
+            command=self._on_crop_toggle,
+        ).pack(side="left")
+        self.win_region_btn = ttk.Button(
+            crop_row, text="영역 선택", command=self._select_win_region,
+            state="disabled",
+        )
+        self.win_region_btn.pack(side="left", padx=(8, 0))
+        self.win_region_var = tk.StringVar(value="(전체 창)")
+        ttk.Label(crop_row, textvariable=self.win_region_var).pack(
+            side="left", padx=(10, 0)
+        )
+
+        dir_row = ttk.Frame(frm)
+        dir_row.pack(fill="x", padx=12, pady=(12, 0))
+        ttk.Label(dir_row, text="FPS").pack(side="left")
+        self.win_fps_var = tk.StringVar(value="30")
+        ttk.Combobox(
+            dir_row, textvariable=self.win_fps_var, width=5, state="readonly",
+            values=["15", "30", "60"],
+        ).pack(side="left", padx=(6, 16))
+        self.win_dir_var = tk.StringVar(value=default_download_dir())
+        ttk.Entry(dir_row, textvariable=self.win_dir_var).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(
+            dir_row, text="찾아보기",
+            command=lambda: self._choose_dir(self.win_dir_var),
+        ).pack(side="left", padx=(6, 0))
+
+        self.win_record_btn = ttk.Button(
+            frm, text="●  녹화 시작", command=self._toggle_win_record,
+            state="disabled",
+        )
+        self.win_record_btn.pack(fill="x", padx=12, pady=(12, 4))
+
+        self.win_status_var = tk.StringVar(value="창을 선택하세요")
+        ttk.Label(frm, textvariable=self.win_status_var).pack(anchor="w", padx=12)
+
+        self._refresh_windows()
+
+        if downloader.find_ffmpeg() is None:
+            self.win_status_var.set("⚠ 화면 녹화에는 ffmpeg가 필요합니다.")
+
+    def _refresh_windows(self) -> None:
+        self._win_list = [
+            w for w in winutil.list_windows()
+            if w.title != self.root.title()  # 우리 앱 창 제외
+        ]
+        labels = [self._win_label(w) for w in self._win_list]
+        self.win_combo.config(values=labels)
+        if labels:
+            self.win_status_var.set("창을 선택하세요")
+        else:
+            self.win_status_var.set("녹화할 창을 찾지 못했습니다")
+
+    @staticmethod
+    def _win_label(w: winutil.WindowInfo) -> str:
+        t = w.title if len(w.title) <= 60 else w.title[:57] + "…"
+        return f"{t}   [{w.hwnd}]"
+
+    def _on_win_selected(self, _e=None) -> None:
+        idx = self.win_combo.current()
+        if idx < 0 or idx >= len(self._win_list):
+            return
+        self._win_hwnd = self._win_list[idx].hwnd
+        self._win_crop = None
+        self.win_region_var.set("(전체 창)")
+        self.win_record_btn.config(state="normal")
+        self.win_status_var.set("준비됨 — 녹화 시작 가능")
+
+    def _on_crop_toggle(self) -> None:
+        on = self.win_crop_var.get()
+        self.win_region_btn.config(state="normal" if on else "disabled")
+        if not on:
+            self._win_crop = None
+            self.win_region_var.set("(전체 창)")
+
+    def _select_win_region(self) -> None:
+        if self._win_hwnd is None:
+            messagebox.showinfo("창 선택", "먼저 녹화할 창을 고르세요.")
+            return
+        winutil.bring_to_front(self._win_hwnd)
+        self.root.withdraw()
+        self.root.update()
+        time.sleep(0.35)
+        rect = winutil.window_frame_rect(self._win_hwnd)  # (l, t, w, h)
+        sel = RegionSelector(self.root).select()
+        self.root.deiconify()
+        if not sel or sel.width < 2 or sel.height < 2:
+            return
+        # 화면 좌표 → 창 기준 좌표
+        cl = max(0, sel.x - rect[0])
+        ct = max(0, sel.y - rect[1])
+        self._win_crop = (cl, ct, sel.width, sel.height)
+        self.win_region_var.set(f"부분 {sel.width}×{sel.height} @창({cl},{ct})")
+
+    def _toggle_win_record(self) -> None:
+        if self._win_recorder and self._win_recorder.is_recording:
+            self._stop_win_record()
+        else:
+            self._start_win_record()
+
+    def _start_win_record(self) -> None:
+        if self._win_hwnd is None:
+            return
+        out_dir = self.win_dir_var.get().strip() or default_download_dir()
+        fname = "window_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".mp4"
+        self._win_out = os.path.join(out_dir, fname)
+        try:
+            fps = int(self.win_fps_var.get())
+        except ValueError:
+            fps = 30
+        crop = self._win_crop if self.win_crop_var.get() else None
+
+        self._win_recorder = recorder.WindowRecorder(
+            self._win_hwnd, self._win_out, fps=fps, crop=crop
+        )
+        self.win_record_btn.config(state="disabled", text="준비 중…")
+        self.win_status_var.set("준비 중… (첫 프레임 대기)")
+
+        rec = self._win_recorder
+
+        def worker():
+            try:
+                rec.start()
+                self._events.put(("winrec_started", os.path.basename(self._win_out)))
+            except Exception as e:  # noqa: BLE001
+                self._events.put(("winrec_error", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_win_record(self) -> None:
+        if not self._win_recorder:
+            return
+        self.win_record_btn.config(state="disabled", text="저장 중…")
+        self.win_status_var.set("저장 중… (영상 마무리)")
+        rec = self._win_recorder
+        out = self._win_out
+
+        def worker():
+            rec.stop()
+            self._events.put(("winrec_done", out))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------- 공용 ----------
     def _paste(self) -> None:
@@ -359,6 +543,12 @@ class AutoDLApp:
                     self._on_dl_done(payload)
                 elif kind == "rec_done":
                     self._on_rec_done(payload)
+                elif kind == "winrec_started":
+                    self._on_winrec_started(payload)
+                elif kind == "winrec_error":
+                    self._on_winrec_error(payload)
+                elif kind == "winrec_done":
+                    self._on_winrec_done(payload)
         except queue.Empty:
             pass
         self.root.after(100, self._poll_events)
@@ -410,6 +600,27 @@ class AutoDLApp:
         else:
             self.rec_status_var.set("저장 실패 ✖")
 
+    def _on_winrec_started(self, fname: str) -> None:
+        self.win_record_btn.config(state="normal", text="■  녹화 중지")
+        self.win_status_var.set(f"● 녹화 중 → {fname}")
+
+    def _on_winrec_error(self, msg: str) -> None:
+        self.win_record_btn.config(state="normal", text="●  녹화 시작")
+        self.win_status_var.set("녹화 시작 실패 ✖")
+        self._win_recorder = None
+        messagebox.showerror("녹화 시작 실패", msg)
+
+    def _on_winrec_done(self, out_path: str) -> None:
+        self._win_recorder = None
+        self.win_record_btn.config(state="normal", text="●  녹화 시작")
+        if out_path and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            size_mb = os.path.getsize(out_path) / 1024 / 1024
+            self.win_status_var.set(f"저장 완료 ✓  ({size_mb:.1f} MB)")
+            if messagebox.askyesno("녹화 완료", "녹화를 저장했습니다.\n폴더를 열까요?"):
+                open_folder(os.path.dirname(out_path))
+        else:
+            self.win_status_var.set("저장 실패 ✖")
+
     # ---------- 보조 ----------
     def _append_log(self, msg: str) -> None:
         self.log.config(state="normal")
@@ -418,17 +629,32 @@ class AutoDLApp:
         self.log.config(state="disabled")
 
     def _on_close(self) -> None:
-        if self._recorder and self._recorder.is_recording:
+        recording = (self._recorder and self._recorder.is_recording) or (
+            self._win_recorder and self._win_recorder.is_recording
+        )
+        if recording:
             if not messagebox.askyesno(
                 "녹화 중", "녹화가 진행 중입니다. 중지하고 종료할까요?"
             ):
                 return
-            self._recorder.stop()
+            if self._recorder:
+                self._recorder.stop()
+            if self._win_recorder:
+                self._win_recorder.stop()
         self.root.destroy()
 
 
 def main() -> None:
+    # Tk 생성 전에 DPI 인식을 켜야 좌표가 물리 픽셀로 통일된다.
+    winutil.set_dpi_awareness()
     root = tk.Tk()
+    # DPI 배율만큼 UI를 키워 작게 보이지 않게 한다.
+    try:
+        scale = winutil.get_dpi_scale()
+        if scale and scale != 1.0:
+            root.tk.call("tk", "scaling", scale * 1.0)
+    except Exception:
+        pass
     AutoDLApp(root)
     root.mainloop()
 
