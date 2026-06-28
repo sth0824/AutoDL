@@ -123,6 +123,16 @@ def pid_of_window(hwnd: int) -> int:
     return int(pid.value)
 
 
+def is_window(hwnd: int) -> bool:
+    """아직 살아 있는(유효한) 창 핸들인지."""
+    return bool(user32.IsWindow(wintypes.HWND(hwnd)))
+
+
+def is_minimized(hwnd: int) -> bool:
+    """최소화(아이콘화)된 창인지."""
+    return bool(user32.IsIconic(wintypes.HWND(hwnd)))
+
+
 def bring_to_front(hwnd: int) -> None:
     SW_RESTORE = 9
     user32.ShowWindow(hwnd, SW_RESTORE)

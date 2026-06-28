@@ -470,6 +470,24 @@ class AutoDLApp:
     def _start_win_record(self) -> None:
         if self._win_hwnd is None:
             return
+        # 선택한 창이 아직 유효한지 시작 전에 확인 (닫혔거나 최소화 등)
+        if not winutil.is_window(self._win_hwnd):
+            messagebox.showwarning(
+                "창을 찾을 수 없음",
+                "선택한 창이 닫혔거나 바뀌었습니다.\n"
+                "'새로고침'을 누르고 창을 다시 선택하세요.",
+            )
+            self._refresh_windows()
+            self.win_record_btn.config(state="disabled")
+            self._win_hwnd = None
+            return
+        if winutil.is_minimized(self._win_hwnd):
+            messagebox.showwarning(
+                "최소화된 창",
+                "최소화된 창은 녹화할 수 없습니다.\n"
+                "창을 화면에 보이게 띄운 뒤(가려지는 건 괜찮음) 다시 시작하세요.",
+            )
+            return
         out_dir = self.win_dir_var.get().strip() or default_download_dir()
         fname = "window_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".mp4"
         self._win_out = os.path.join(out_dir, fname)
@@ -827,7 +845,17 @@ class AutoDLApp:
         self.win_record_btn.config(state="normal", text="●  녹화 시작")
         self.win_status_var.set("녹화 시작 실패 ✖")
         self._win_recorder = None
-        messagebox.showerror("녹화 시작 실패", msg)
+        hint = ""
+        if "GraphicsCaptureItem" in msg or "convert item" in msg:
+            hint = (
+                "\n\n선택한 창을 캡처할 수 없습니다. 보통 창이 닫혔거나 바뀐 경우예요.\n"
+                "→ '새로고침'을 누르고 창을 다시 선택한 뒤 시작하세요.\n"
+                "(특히 'Whale 실행' 버튼으로 새 창을 띄웠다면 목록을 새로고침해야 합니다.)"
+            )
+            self._refresh_windows()
+            self.win_record_btn.config(state="disabled")
+            self._win_hwnd = None
+        messagebox.showerror("녹화 시작 실패", msg + hint)
 
     def _on_winrec_done(self, out_path: str) -> None:
         self._win_recorder = None
