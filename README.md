@@ -1,9 +1,10 @@
 # AutoDL
 
-URL만 붙여넣으면 웹사이트의 영상을 **가능한 최고화질**로 자동 다운로드하는 데스크톱 앱.
+영상 **다운로드**와 **화면 영역 녹화**를 한 창에서 처리하는 데스크톱 앱.
 
-[yt-dlp](https://github.com/yt-dlp/yt-dlp)(유튜브·인스타그램·트위터 등 수천 개 사이트 지원)와
-ffmpeg를 감싸, 최고 해상도 영상과 최고 음질 오디오를 받아 MP4로 합쳐줍니다.
+- **다운로드 탭**: URL만 붙여넣으면 [yt-dlp](https://github.com/yt-dlp/yt-dlp)(유튜브·트위터 등
+  수천 개 사이트)로 **가능한 최고화질** 영상+음성을 받아 MP4로 합칩니다.
+- **화면 녹화 탭**: 화면에서 원하는 영역만 드래그로 골라 MP4로 녹화합니다(ffmpeg gdigrab).
 
 ## 설치
 
@@ -20,9 +21,11 @@ pip install -r requirements.txt
 python autodl.py
 ```
 
-1. 영상 URL을 붙여넣고
-2. 저장 폴더를 고른 뒤
-3. **⬇ 최고화질로 다운로드** 클릭
+**다운로드:** URL 붙여넣기 → 저장 폴더 확인 → **⬇ 최고화질로 다운로드**
+
+**화면 녹화:** `● 화면 녹화` 탭 → **영역 선택**(화면을 드래그) → **● 녹화 시작** → 끝나면 **■ 녹화 중지**
+- 영상만 녹화되며 소리는 포함되지 않습니다.
+- 영역 선택은 주 모니터 기준입니다.
 
 ### YouTube 최상위 화질 (선택)
 
@@ -40,8 +43,9 @@ python autodl.py
 
 | 파일 | 역할 |
 | --- | --- |
-| `autodl.py` | tkinter GUI |
-| `downloader.py` | yt-dlp 래퍼(다운로드 엔진). GUI/스크립트에서 공유 |
+| `autodl.py` | tkinter GUI (다운로드 + 녹화 탭, 영역 선택 오버레이) |
+| `downloader.py` | yt-dlp 래퍼(다운로드 엔진) |
+| `recorder.py` | ffmpeg gdigrab 화면 영역 녹화 엔진 |
 | `requirements.txt` | 의존성 |
 
 ## 주의
