@@ -38,6 +38,18 @@ def open_folder(path: str) -> None:
 QUALITY_LABELS = ["표준 (작은 용량)", "고화질 (권장)", "최고화질 (큰 용량)"]
 QUALITY_CRF = {QUALITY_LABELS[0]: 23, QUALITY_LABELS[1]: 18, QUALITY_LABELS[2]: 14}
 
+# 창 녹화 오디오 모드
+WIN_AUDIO_LABELS = ["이 창 앱 소리만 (권장)", "전체 시스템 소리", "소리 없음"]
+
+
+def win_audio_settings(label: str) -> tuple[bool, str]:
+    """오디오 라벨 → (record_audio, audio_mode)."""
+    if label == WIN_AUDIO_LABELS[1]:
+        return True, "system"
+    if label == WIN_AUDIO_LABELS[2]:
+        return False, "app"
+    return True, "app"
+
 
 def notify(root: tk.Tk, title: str, msg: str) -> None:
     """간단한 완료 알림: 소리 + 창 띄우기 + 메시지박스(가능한 범위)."""
@@ -334,15 +346,17 @@ class AutoDLApp:
 
         opt_row = ttk.Frame(frm)
         opt_row.pack(fill="x", padx=12, pady=(8, 0))
-        self.win_audio_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            opt_row, text="소리 포함", variable=self.win_audio_var
-        ).pack(side="left")
+        ttk.Label(opt_row, text="소리").pack(side="left")
+        self.win_audio_var = tk.StringVar(value=WIN_AUDIO_LABELS[0])
+        ttk.Combobox(
+            opt_row, textvariable=self.win_audio_var, width=20, state="readonly",
+            values=WIN_AUDIO_LABELS,
+        ).pack(side="left", padx=(6, 16))
         self.whale_btn = ttk.Button(
             opt_row, text="가려도 녹화되게 Whale 실행",
             command=self._launch_whale_for_capture,
         )
-        self.whale_btn.pack(side="left", padx=(16, 0))
+        self.whale_btn.pack(side="left")
 
         tip = (
             "※ 가린 상태에서 흰 화면이 나오면 브라우저가 절전으로 그리기를 멈춘 것.\n"
@@ -465,9 +479,10 @@ class AutoDLApp:
             fps = 30
         crop = self._win_crop if self.win_crop_var.get() else None
 
+        rec_audio, audio_mode = win_audio_settings(self.win_audio_var.get())
         self._win_recorder = recorder.WindowRecorder(
             self._win_hwnd, self._win_out, fps=fps, crop=crop,
-            record_audio=self.win_audio_var.get(),
+            record_audio=rec_audio, audio_mode=audio_mode,
             crf=self._crf_of(self.win_opts),
             show_cursor=self.win_opts["cursor"].get(),
         )
@@ -780,7 +795,13 @@ class AutoDLApp:
 
     def _on_winrec_started(self, fname: str) -> None:
         self.win_record_btn.config(state="normal", text="■  녹화 중지")
-        self.win_status_var.set(f"● 녹화 중 → {fname}")
+        note = ""
+        rec = self._win_recorder
+        want_app = win_audio_settings(self.win_audio_var.get())[1] == "app"
+        if rec and self.win_audio_var.get() != WIN_AUDIO_LABELS[2] \
+                and want_app and rec.audio_mode_used == "system":
+            note = "  (앱 소리 분리 실패 → 전체 소리로 녹음)"
+        self.win_status_var.set(f"● 녹화 중 → {fname}{note}")
         secs = self._timer_seconds(self.win_opts)
         self._win_by_timer = False
         self._win_deadline = (time.monotonic() + secs) if secs > 0 else None

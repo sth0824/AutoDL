@@ -215,6 +215,36 @@ def _start_ffmpeg_rawvideo(ff: str, width: int, height: int, fps: int, out: str,
     )
 
 
+def _start_window_audio(hwnd: int, wav: str, mode: str):
+    """창의 오디오 녹음기를 시작한다.
+
+    mode="app": 그 창의 앱(프로세스) 소리만 녹음(프로세스 루프백). 실패하면
+    전체 시스템 소리로 자동 폴백한다. mode="system": 처음부터 전체 소리.
+    반환: (recorder_or_None, 실제_사용_모드)
+    """
+    if mode == "app":
+        try:
+            import procaudio
+            import winutil
+
+            if procaudio.ProcessAudioRecorder.available():
+                pid = winutil.pid_of_window(hwnd)
+                if pid:
+                    rec = procaudio.ProcessAudioRecorder(pid, wav)
+                    rec.start()
+                    if rec.error is None:
+                        return rec, "app"
+                    rec.stop()  # 초기화 실패 → 폴백
+        except Exception:
+            pass  # 아래 시스템 폴백
+
+    if audiocap.LoopbackRecorder.available():
+        rec = audiocap.LoopbackRecorder(wav)
+        rec.start()
+        return rec, "system"
+    return None, ""
+
+
 class WindowRecorder:
     """특정 창을 Windows Graphics Capture(WGC)로 녹화한다.
 
@@ -234,6 +264,7 @@ class WindowRecorder:
         record_audio: bool = True,
         crf: int = 18,
         show_cursor: bool = False,
+        audio_mode: str = "app",
     ):
         self.hwnd = hwnd
         self.output_path = output_path
@@ -242,6 +273,8 @@ class WindowRecorder:
         self.record_audio = record_audio
         self.crf = crf
         self.show_cursor = show_cursor
+        self.audio_mode = audio_mode  # "app" = 이 창의 앱 소리만, "system" = 전체
+        self.audio_mode_used = ""     # 실제 사용된 모드(폴백 결과 보고용)
 
         self._cap = None
         self._control = None
@@ -353,9 +386,10 @@ class WindowRecorder:
         self._writer = threading.Thread(target=self._writer_loop, daemon=True)
         self._writer.start()
 
-        if self.record_audio and audiocap.LoopbackRecorder.available():
-            self._audio = audiocap.LoopbackRecorder(self.output_path + ".audio.wav")
-            self._audio.start()
+        if self.record_audio:
+            self._audio, self.audio_mode_used = _start_window_audio(
+                self.hwnd, self.output_path + ".audio.wav", self.audio_mode
+            )
 
     def stop(self, timeout: float = 10.0) -> None:
         if self._stop:

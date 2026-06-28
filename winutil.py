@@ -116,6 +116,13 @@ def window_frame_rect(hwnd: int) -> tuple[int, int, int, int]:
     return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
 
 
+def pid_of_window(hwnd: int) -> int:
+    """창(hwnd)을 소유한 프로세스 ID."""
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+    return int(pid.value)
+
+
 def bring_to_front(hwnd: int) -> None:
     SW_RESTORE = 9
     user32.ShowWindow(hwnd, SW_RESTORE)
