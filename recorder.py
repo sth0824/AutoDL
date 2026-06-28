@@ -104,11 +104,14 @@ class RegionRecorder:
     """gdigrab로 지정 영역을 녹화하는 ffmpeg 프로세스 래퍼."""
 
     def __init__(self, region: Region, output_path: str, fps: int = 30,
-                 record_audio: bool = True):
+                 record_audio: bool = True, crf: int = 18,
+                 show_cursor: bool = False):
         self.region = region.normalized()
         self.output_path = output_path
         self.fps = fps
         self.record_audio = record_audio
+        self.crf = crf
+        self.show_cursor = show_cursor
         self._proc: subprocess.Popen | None = None
         self._video_tmp = output_path + ".video.mp4"
         self._audio: audiocap.LoopbackRecorder | None = None
@@ -136,10 +139,11 @@ class RegionRecorder:
             "-offset_x", str(r.x),
             "-offset_y", str(r.y),
             "-video_size", f"{r.width}x{r.height}",
-            "-draw_mouse", "1",
+            "-draw_mouse", "1" if self.show_cursor else "0",
             "-i", "desktop",
             "-c:v", "libx264",
             "-preset", "veryfast",
+            "-crf", str(self.crf),
             "-pix_fmt", "yuv420p",
             self._video_tmp,
         ]
@@ -185,7 +189,8 @@ class RegionRecorder:
         return self._proc is not None and (self._proc.poll() or 0) != 0
 
 
-def _start_ffmpeg_rawvideo(ff: str, width: int, height: int, fps: int, out: str):
+def _start_ffmpeg_rawvideo(ff: str, width: int, height: int, fps: int, out: str,
+                           crf: int = 18):
     """BGRA 원시 프레임을 stdin으로 받아 H.264 MP4로 인코딩하는 ffmpeg 시작."""
     cmd = [
         ff, "-hide_banner", "-y",
@@ -196,6 +201,7 @@ def _start_ffmpeg_rawvideo(ff: str, width: int, height: int, fps: int, out: str)
         "-i", "-",
         "-c:v", "libx264",
         "-preset", "veryfast",
+        "-crf", str(crf),
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         out,
@@ -226,12 +232,16 @@ class WindowRecorder:
         fps: int = 30,
         crop: Optional[tuple[int, int, int, int]] = None,
         record_audio: bool = True,
+        crf: int = 18,
+        show_cursor: bool = False,
     ):
         self.hwnd = hwnd
         self.output_path = output_path
         self.fps = fps
         self.crop = crop
         self.record_audio = record_audio
+        self.crf = crf
+        self.show_cursor = show_cursor
 
         self._cap = None
         self._control = None
@@ -314,7 +324,7 @@ class WindowRecorder:
         import windows_capture as wc
 
         self._cap = wc.WindowsCapture(
-            cursor_capture=True,
+            cursor_capture=self.show_cursor,
             draw_border=False,
             window_hwnd=self.hwnd,
         )
@@ -337,7 +347,9 @@ class WindowRecorder:
 
         os.makedirs(os.path.dirname(os.path.abspath(self.output_path)), exist_ok=True)
         w, h = self._out_size
-        self._proc = _start_ffmpeg_rawvideo(ff, w, h, self.fps, self._video_tmp)
+        self._proc = _start_ffmpeg_rawvideo(
+            ff, w, h, self.fps, self._video_tmp, crf=self.crf
+        )
         self._writer = threading.Thread(target=self._writer_loop, daemon=True)
         self._writer.start()
 

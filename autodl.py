@@ -34,6 +34,28 @@ def open_folder(path: str) -> None:
         pass
 
 
+# 화질: CRF가 낮을수록 고화질·큰 용량 (시각적으로 18≈거의 무손실, 23=표준)
+QUALITY_LABELS = ["표준 (작은 용량)", "고화질 (권장)", "최고화질 (큰 용량)"]
+QUALITY_CRF = {QUALITY_LABELS[0]: 23, QUALITY_LABELS[1]: 18, QUALITY_LABELS[2]: 14}
+
+
+def notify(root: tk.Tk, title: str, msg: str) -> None:
+    """간단한 완료 알림: 소리 + 창 띄우기 + 메시지박스(가능한 범위)."""
+    try:
+        import winsound
+
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    except Exception:
+        pass
+    try:
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+    except Exception:
+        pass
+    messagebox.showinfo(title, msg)
+
+
 # ===================== 영역 선택 오버레이 =====================
 class RegionSelector:
     """전체화면 반투명 오버레이에서 드래그로 영역을 고른다(주 모니터 기준)."""
@@ -109,6 +131,9 @@ class AutoDLApp:
         # 영역 녹화 상태
         self._recorder: recorder.RegionRecorder | None = None
         self._region: recorder.Region | None = None
+        self._rec_after: str | None = None
+        self._rec_deadline: float | None = None
+        self._rec_by_timer = False
 
         # 창 녹화 상태
         self._win_recorder: recorder.WindowRecorder | None = None
@@ -116,6 +141,9 @@ class AutoDLApp:
         self._win_hwnd: int | None = None
         self._win_crop: tuple[int, int, int, int] | None = None
         self._win_out: str = ""
+        self._win_after: str | None = None
+        self._win_deadline: float | None = None
+        self._win_by_timer = False
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
@@ -229,6 +257,8 @@ class AutoDLApp:
             side="left"
         )
 
+        self.rec_opts = self._build_capture_options(frm)
+
         self.region_var = tk.StringVar(value="선택된 영역 없음")
         ttk.Label(frm, textvariable=self.region_var).pack(anchor="w", padx=12, pady=(8, 0))
 
@@ -321,6 +351,8 @@ class AutoDLApp:
         ttk.Label(frm, text=tip, justify="left", foreground="#888").pack(
             anchor="w", padx=12, pady=(6, 0)
         )
+
+        self.win_opts = self._build_capture_options(frm)
 
         self.win_record_btn = ttk.Button(
             frm, text="●  녹화 시작", command=self._toggle_win_record,
@@ -436,6 +468,8 @@ class AutoDLApp:
         self._win_recorder = recorder.WindowRecorder(
             self._win_hwnd, self._win_out, fps=fps, crop=crop,
             record_audio=self.win_audio_var.get(),
+            crf=self._crf_of(self.win_opts),
+            show_cursor=self.win_opts["cursor"].get(),
         )
         self.win_record_btn.config(state="disabled", text="준비 중…")
         self.win_status_var.set("준비 중… (첫 프레임 대기)")
@@ -454,6 +488,10 @@ class AutoDLApp:
     def _stop_win_record(self) -> None:
         if not self._win_recorder:
             return
+        if self._win_after is not None:
+            self.root.after_cancel(self._win_after)
+            self._win_after = None
+        self._win_deadline = None
         self.win_record_btn.config(state="disabled", text="저장 중…")
         self.win_status_var.set("저장 중… (영상 마무리)")
         rec = self._win_recorder
@@ -464,6 +502,59 @@ class AutoDLApp:
             self._events.put(("winrec_done", out))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- 녹화 공통 옵션 ----------
+    def _build_capture_options(self, parent: ttk.Frame) -> dict:
+        """화질 / 마우스 커서 / 타이머 옵션 행을 만들고 변수 dict를 돌려준다."""
+        ns: dict = {}
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=12, pady=(8, 0))
+
+        ttk.Label(row, text="화질").pack(side="left")
+        ns["quality"] = tk.StringVar(value=QUALITY_LABELS[1])
+        ttk.Combobox(
+            row, textvariable=ns["quality"], width=16, state="readonly",
+            values=QUALITY_LABELS,
+        ).pack(side="left", padx=(6, 16))
+
+        ns["cursor"] = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            row, text="마우스 커서 표시", variable=ns["cursor"]
+        ).pack(side="left", padx=(0, 16))
+
+        ttk.Label(row, text="타이머").pack(side="left")
+        ns["tmin"] = tk.StringVar(value="0")
+        ttk.Spinbox(row, from_=0, to=599, width=4, textvariable=ns["tmin"]).pack(
+            side="left"
+        )
+        ttk.Label(row, text="분").pack(side="left", padx=(2, 6))
+        ns["tsec"] = tk.StringVar(value="0")
+        ttk.Spinbox(row, from_=0, to=59, width=4, textvariable=ns["tsec"]).pack(
+            side="left"
+        )
+        ttk.Label(row, text="초 (0 = 수동 종료)").pack(side="left", padx=(2, 0))
+        return ns
+
+    @staticmethod
+    def _crf_of(ns: dict) -> int:
+        return QUALITY_CRF.get(ns["quality"].get(), 18)
+
+    @staticmethod
+    def _timer_seconds(ns: dict) -> int:
+        try:
+            m = int(ns["tmin"].get() or 0)
+        except ValueError:
+            m = 0
+        try:
+            s = int(ns["tsec"].get() or 0)
+        except ValueError:
+            s = 0
+        return max(0, m * 60 + s)
+
+    @staticmethod
+    def _fmt_mmss(secs: float) -> str:
+        secs = max(0, int(secs))
+        return f"{secs // 60:02d}:{secs % 60:02d}"
 
     # ---------- 공용 ----------
     def _paste(self) -> None:
@@ -548,7 +639,10 @@ class AutoDLApp:
             fps = 30
 
         self._recorder = recorder.RegionRecorder(
-            self._region, out_path, fps=fps, record_audio=self.rec_audio_var.get()
+            self._region, out_path, fps=fps,
+            record_audio=self.rec_audio_var.get(),
+            crf=self._crf_of(self.rec_opts),
+            show_cursor=self.rec_opts["cursor"].get(),
         )
         try:
             self._recorder.start()
@@ -563,6 +657,28 @@ class AutoDLApp:
         self.record_btn.config(text="■  녹화 중지")
         self.rec_status_var.set(f"● 녹화 중 → {fname}")
 
+        # 타이머 설정
+        secs = self._timer_seconds(self.rec_opts)
+        self._rec_by_timer = False
+        self._rec_deadline = (time.monotonic() + secs) if secs > 0 else None
+        if self._rec_deadline:
+            self._tick_rec_timer()
+
+    def _tick_rec_timer(self) -> None:
+        if not self._recorder or not self._recorder.is_recording \
+                or self._rec_deadline is None:
+            return
+        remaining = self._rec_deadline - time.monotonic()
+        if remaining <= 0:
+            self._rec_by_timer = True
+            self._rec_deadline = None
+            self._stop_record()
+            return
+        self.rec_status_var.set(
+            f"● 녹화 중 (남은 시간 {self._fmt_mmss(remaining)})"
+        )
+        self._rec_after = self.root.after(250, self._tick_rec_timer)
+
     def _check_record_started(self) -> None:
         if self._recorder and self._recorder.failed_early():
             self.rec_status_var.set("녹화 실패 ✖ (영역/권한을 확인하세요)")
@@ -572,6 +688,10 @@ class AutoDLApp:
     def _stop_record(self) -> None:
         if not self._recorder:
             return
+        if self._rec_after is not None:
+            self.root.after_cancel(self._rec_after)
+            self._rec_after = None
+        self._rec_deadline = None
         self.record_btn.config(state="disabled", text="저장 중…")
         self.rec_status_var.set("저장 중… (영상 마무리)")
         rec = self._recorder
@@ -644,10 +764,15 @@ class AutoDLApp:
 
     def _on_rec_done(self, out_path: str) -> None:
         self._recorder = None
+        by_timer = self._rec_by_timer
+        self._rec_by_timer = False
         self.record_btn.config(state="normal", text="●  녹화 시작")
         if out_path and os.path.exists(out_path):
             size_mb = os.path.getsize(out_path) / 1024 / 1024
             self.rec_status_var.set(f"저장 완료 ✓  ({size_mb:.1f} MB)")
+            if by_timer:
+                notify(self.root, "녹화 완료",
+                       f"타이머 종료 — 녹화를 저장했습니다.\n({size_mb:.1f} MB)")
             if messagebox.askyesno("녹화 완료", "녹화를 저장했습니다.\n폴더를 열까요?"):
                 open_folder(os.path.dirname(out_path))
         else:
@@ -656,6 +781,26 @@ class AutoDLApp:
     def _on_winrec_started(self, fname: str) -> None:
         self.win_record_btn.config(state="normal", text="■  녹화 중지")
         self.win_status_var.set(f"● 녹화 중 → {fname}")
+        secs = self._timer_seconds(self.win_opts)
+        self._win_by_timer = False
+        self._win_deadline = (time.monotonic() + secs) if secs > 0 else None
+        if self._win_deadline:
+            self._tick_win_timer()
+
+    def _tick_win_timer(self) -> None:
+        if not self._win_recorder or not self._win_recorder.is_recording \
+                or self._win_deadline is None:
+            return
+        remaining = self._win_deadline - time.monotonic()
+        if remaining <= 0:
+            self._win_by_timer = True
+            self._win_deadline = None
+            self._stop_win_record()
+            return
+        self.win_status_var.set(
+            f"● 녹화 중 (남은 시간 {self._fmt_mmss(remaining)})"
+        )
+        self._win_after = self.root.after(250, self._tick_win_timer)
 
     def _on_winrec_error(self, msg: str) -> None:
         self.win_record_btn.config(state="normal", text="●  녹화 시작")
@@ -665,10 +810,15 @@ class AutoDLApp:
 
     def _on_winrec_done(self, out_path: str) -> None:
         self._win_recorder = None
+        by_timer = self._win_by_timer
+        self._win_by_timer = False
         self.win_record_btn.config(state="normal", text="●  녹화 시작")
         if out_path and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             size_mb = os.path.getsize(out_path) / 1024 / 1024
             self.win_status_var.set(f"저장 완료 ✓  ({size_mb:.1f} MB)")
+            if by_timer:
+                notify(self.root, "녹화 완료",
+                       f"타이머 종료 — 녹화를 저장했습니다.\n({size_mb:.1f} MB)")
             if messagebox.askyesno("녹화 완료", "녹화를 저장했습니다.\n폴더를 열까요?"):
                 open_folder(os.path.dirname(out_path))
         else:
