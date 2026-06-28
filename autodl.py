@@ -197,7 +197,7 @@ class AutoDLApp:
 
         info = (
             "화면에서 원하는 영역만 드래그로 선택해 MP4로 녹화합니다.\n"
-            "(영상만 녹화 · 소리는 포함되지 않습니다)"
+            "(시스템 소리 포함 · 그 영역 위로 다른 창이 오면 그 창이 찍힙니다)"
         )
         ttk.Label(frm, text=info, justify="left").pack(anchor="w", **pad)
 
@@ -221,6 +221,10 @@ class AutoDLApp:
             ctl_row, textvariable=self.fps_var, width=5, state="readonly",
             values=["15", "30", "60"],
         ).pack(side="left", padx=(6, 16))
+        self.rec_audio_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            ctl_row, text="소리 포함", variable=self.rec_audio_var
+        ).pack(side="left", padx=(0, 16))
         ttk.Button(ctl_row, text="영역 선택", command=self._select_region).pack(
             side="left"
         )
@@ -298,6 +302,26 @@ class AutoDLApp:
             command=lambda: self._choose_dir(self.win_dir_var),
         ).pack(side="left", padx=(6, 0))
 
+        opt_row = ttk.Frame(frm)
+        opt_row.pack(fill="x", padx=12, pady=(8, 0))
+        self.win_audio_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opt_row, text="소리 포함", variable=self.win_audio_var
+        ).pack(side="left")
+        self.whale_btn = ttk.Button(
+            opt_row, text="가려도 녹화되게 Whale 실행",
+            command=self._launch_whale_for_capture,
+        )
+        self.whale_btn.pack(side="left", padx=(16, 0))
+
+        tip = (
+            "※ 가린 상태에서 흰 화면이 나오면 브라우저가 절전으로 그리기를 멈춘 것.\n"
+            "   위 버튼으로 Whale을 실행하면 가려도 계속 녹화됩니다 (기존 Whale은 먼저 닫기)."
+        )
+        ttk.Label(frm, text=tip, justify="left", foreground="#888").pack(
+            anchor="w", padx=12, pady=(6, 0)
+        )
+
         self.win_record_btn = ttk.Button(
             frm, text="●  녹화 시작", command=self._toggle_win_record,
             state="disabled",
@@ -311,6 +335,32 @@ class AutoDLApp:
 
         if downloader.find_ffmpeg() is None:
             self.win_status_var.set("⚠ 화면 녹화에는 ffmpeg가 필요합니다.")
+
+    def _launch_whale_for_capture(self) -> None:
+        """가려져도 계속 렌더링하도록 Whale을 anti-occlusion 플래그로 실행."""
+        exe = winutil.find_whale()
+        if not exe:
+            messagebox.showwarning(
+                "Whale 없음",
+                "Whale 실행 파일을 찾지 못했습니다.\n"
+                "직접 실행 시 다음 플래그를 추가하세요:\n"
+                "--disable-features=CalculateNativeWinOcclusion",
+            )
+            return
+        if not messagebox.askyesno(
+            "Whale 실행",
+            "기존에 열려 있는 Whale 창을 모두 닫은 뒤 진행하세요.\n"
+            "(이미 실행 중이면 플래그가 적용되지 않습니다)\n\n"
+            "지금 실행할까요?",
+        ):
+            return
+        try:
+            winutil.launch_no_occlusion(exe)
+            self.win_status_var.set(
+                "Whale 실행됨 — 잠시 후 '새로고침'으로 창을 다시 선택하세요."
+            )
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("실행 실패", str(e))
 
     def _refresh_windows(self) -> None:
         self._win_list = [
@@ -384,7 +434,8 @@ class AutoDLApp:
         crop = self._win_crop if self.win_crop_var.get() else None
 
         self._win_recorder = recorder.WindowRecorder(
-            self._win_hwnd, self._win_out, fps=fps, crop=crop
+            self._win_hwnd, self._win_out, fps=fps, crop=crop,
+            record_audio=self.win_audio_var.get(),
         )
         self.win_record_btn.config(state="disabled", text="준비 중…")
         self.win_status_var.set("준비 중… (첫 프레임 대기)")
@@ -496,7 +547,9 @@ class AutoDLApp:
         except ValueError:
             fps = 30
 
-        self._recorder = recorder.RegionRecorder(self._region, out_path, fps=fps)
+        self._recorder = recorder.RegionRecorder(
+            self._region, out_path, fps=fps, record_audio=self.rec_audio_var.get()
+        )
         try:
             self._recorder.start()
         except Exception as e:  # noqa: BLE001

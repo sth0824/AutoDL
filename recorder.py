@@ -1,8 +1,11 @@
 """AutoDL 화면 녹화 엔진.
 
-ffmpeg의 gdigrab(Windows 화면 캡처)을 써서, 사용자가 고른 화면 영역만
-동영상(MP4)으로 녹화한다. ffmpeg 바이너리는 downloader와 동일하게
-시스템 PATH → imageio-ffmpeg 순으로 찾는다.
+두 가지 방식:
+- RegionRecorder: ffmpeg gdigrab으로 화면의 고정 영역 녹화.
+- WindowRecorder: Windows Graphics Capture(WGC)로 특정 창 녹화(가려져도 OK).
+
+두 방식 모두 시스템 소리(스피커 루프백)를 함께 녹음해 ffmpeg로 합친다.
+ffmpeg 바이너리는 downloader와 동일하게 시스템 PATH → imageio-ffmpeg 순으로 찾는다.
 """
 
 from __future__ import annotations
@@ -15,10 +18,64 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import audiocap
 import downloader  # find_ffmpeg 재사용
 
 # Windows에서 콘솔 창이 깜빡이지 않게.
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+
+def _safe_remove(path: str) -> None:
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _mux_av(video_tmp: str, audio: Optional[audiocap.LoopbackRecorder],
+            output_path: str) -> None:
+    """녹화된 (무음)영상과 녹음된 오디오를 합쳐 output_path로 만든다.
+
+    오디오가 없거나 실패하면 영상만 그대로 결과로 쓴다(무음 fallback).
+    """
+    audio_wav = None
+    if audio is not None:
+        audio.stop()
+        audio_wav = audio.wav_path
+        ok = (
+            audio.error is None
+            and os.path.exists(audio_wav)
+            and os.path.getsize(audio_wav) > 1024
+        )
+        if ok:
+            ff = downloader.find_ffmpeg()
+            cmd = [
+                ff, "-hide_banner", "-y",
+                "-i", video_tmp,
+                "-i", audio_wav,
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                output_path,
+            ]
+            r = subprocess.run(
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+            if r.returncode == 0 and os.path.exists(output_path):
+                _safe_remove(video_tmp)
+                _safe_remove(audio_wav)
+                return
+
+    # fallback: 무음 영상만
+    _safe_remove(output_path)
+    try:
+        os.replace(video_tmp, output_path)
+    except OSError:
+        pass
+    _safe_remove(audio_wav)
 
 
 @dataclass
@@ -46,11 +103,15 @@ class Region:
 class RegionRecorder:
     """gdigrab로 지정 영역을 녹화하는 ffmpeg 프로세스 래퍼."""
 
-    def __init__(self, region: Region, output_path: str, fps: int = 30):
+    def __init__(self, region: Region, output_path: str, fps: int = 30,
+                 record_audio: bool = True):
         self.region = region.normalized()
         self.output_path = output_path
         self.fps = fps
+        self.record_audio = record_audio
         self._proc: subprocess.Popen | None = None
+        self._video_tmp = output_path + ".video.mp4"
+        self._audio: audiocap.LoopbackRecorder | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -80,7 +141,7 @@ class RegionRecorder:
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-pix_fmt", "yuv420p",
-            self.output_path,
+            self._video_tmp,
         ]
         # stdin은 'q'로 정상 종료시키는 데 쓴다(MP4 moov atom 정상 기록).
         # stderr는 한글 콘솔 인코딩 문제를 피하려 버린다.
@@ -92,8 +153,12 @@ class RegionRecorder:
             creationflags=_CREATE_NO_WINDOW,
         )
 
+        if self.record_audio and audiocap.LoopbackRecorder.available():
+            self._audio = audiocap.LoopbackRecorder(output_path + ".audio.wav")
+            self._audio.start()
+
     def stop(self, timeout: float = 8.0) -> None:
-        """녹화를 정상 종료한다."""
+        """녹화를 정상 종료하고 오디오와 합친다."""
         if not self._proc:
             return
         if self._proc.poll() is None:
@@ -112,6 +177,8 @@ class RegionRecorder:
                 except subprocess.TimeoutExpired:
                     self._proc.kill()
         self._proc = None
+        _mux_av(self._video_tmp, self._audio, self.output_path)
+        self._audio = None
 
     def failed_early(self) -> bool:
         """시작 직후 ffmpeg가 0이 아닌 코드로 죽었는지(영역 오류 등)."""
@@ -158,11 +225,13 @@ class WindowRecorder:
         output_path: str,
         fps: int = 30,
         crop: Optional[tuple[int, int, int, int]] = None,
+        record_audio: bool = True,
     ):
         self.hwnd = hwnd
         self.output_path = output_path
         self.fps = fps
         self.crop = crop
+        self.record_audio = record_audio
 
         self._cap = None
         self._control = None
@@ -173,6 +242,8 @@ class WindowRecorder:
         self._out_size: tuple[int, int] | None = None
         self._stop = False
         self.error: str | None = None
+        self._video_tmp = output_path + ".video.mp4"
+        self._audio: audiocap.LoopbackRecorder | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -266,11 +337,17 @@ class WindowRecorder:
 
         os.makedirs(os.path.dirname(os.path.abspath(self.output_path)), exist_ok=True)
         w, h = self._out_size
-        self._proc = _start_ffmpeg_rawvideo(ff, w, h, self.fps, self.output_path)
+        self._proc = _start_ffmpeg_rawvideo(ff, w, h, self.fps, self._video_tmp)
         self._writer = threading.Thread(target=self._writer_loop, daemon=True)
         self._writer.start()
 
+        if self.record_audio and audiocap.LoopbackRecorder.available():
+            self._audio = audiocap.LoopbackRecorder(self.output_path + ".audio.wav")
+            self._audio.start()
+
     def stop(self, timeout: float = 10.0) -> None:
+        if self._stop:
+            return
         self._stop = True
         if self._control is not None:
             try:
@@ -292,3 +369,5 @@ class WindowRecorder:
             except subprocess.TimeoutExpired:
                 self._proc.terminate()
             self._proc = None
+        _mux_av(self._video_tmp, self._audio, self.output_path)
+        self._audio = None

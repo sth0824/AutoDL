@@ -10,6 +10,7 @@ env/
 *.webm
 *.mkv
 *.m4a
+*.wav
 *.part
 *.ytdl
 downloads/

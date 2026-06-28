@@ -34,7 +34,17 @@ python autodl.py
 - 다른 창이 위를 덮거나 다른 앱으로 전환해도 그 창 내용만 계속 녹화됩니다.
 - 창을 **최소화하면** 캡처가 멈춥니다(화면에서 사라지므로).
 
-> 두 녹화 모두 **영상만** 저장되고 소리는 포함되지 않습니다.
+> 두 녹화 모두 시스템 소리(스피커로 나오는 소리)가 함께 녹음됩니다. `소리 포함` 체크로 끌 수 있습니다.
+
+### 가렸을 때 흰 화면이 나온다면 (브라우저)
+
+Chrome·Edge·Whale 같은 크로미움 브라우저는 창이 **가려지면 절전을 위해 그리기를 멈춥니다.**
+그러면 녹화 영상이 흰/멈춘 화면이 됩니다. 창 녹화 탭의 **`가려도 녹화되게 Whale 실행`** 버튼을
+쓰거나, 브라우저를 아래 플래그로 직접 실행하세요(기존 창은 모두 닫은 뒤):
+
+```
+whale.exe --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows
+```
 
 ### YouTube 최상위 화질 (선택)
 
@@ -54,8 +64,9 @@ python autodl.py
 | --- | --- |
 | `autodl.py` | tkinter GUI (다운로드 + 영역 녹화 + 창 녹화 탭, 영역 선택 오버레이) |
 | `downloader.py` | yt-dlp 래퍼(다운로드 엔진) |
-| `recorder.py` | 녹화 엔진: `RegionRecorder`(gdigrab 영역) + `WindowRecorder`(WGC 창) |
-| `winutil.py` | 창 열거·좌표·DPI 헬퍼 (ctypes) |
+| `recorder.py` | 녹화 엔진: `RegionRecorder`(gdigrab 영역) + `WindowRecorder`(WGC 창), 오디오 합치기 |
+| `audiocap.py` | 시스템 소리 루프백 녹음(WASAPI) |
+| `winutil.py` | 창 열거·좌표·DPI·브라우저 실행 헬퍼 (ctypes) |
 | `requirements.txt` | 의존성 |
 
 ## 주의

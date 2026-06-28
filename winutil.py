@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import ctypes
+import glob
+import os
+import subprocess
 from ctypes import wintypes
 from dataclasses import dataclass
 
@@ -117,3 +120,34 @@ def bring_to_front(hwnd: int) -> None:
     SW_RESTORE = 9
     user32.ShowWindow(hwnd, SW_RESTORE)
     user32.SetForegroundWindow(hwnd)
+
+
+def find_whale() -> str | None:
+    """Naver Whale 실행 파일 경로를 찾는다."""
+    for base in (
+        os.environ.get("LOCALAPPDATA", ""),
+        os.environ.get("PROGRAMFILES", ""),
+        os.environ.get("PROGRAMFILES(X86)", ""),
+    ):
+        if not base:
+            continue
+        hits = glob.glob(
+            os.path.join(base, "Naver", "Naver Whale", "Application", "whale.exe")
+        )
+        if hits:
+            return hits[0]
+    return None
+
+
+def launch_no_occlusion(exe: str) -> None:
+    """크로미움 기반 브라우저를 '가려도 계속 그리도록' 실행.
+
+    CalculateNativeWinOcclusion 기능을 끄면 창이 가려져도 렌더링을 멈추지
+    않아, 창 녹화(WGC)에서 흰 화면이 되는 문제가 사라진다.
+    (이미 같은 브라우저가 실행 중이면 플래그가 무시되므로 먼저 닫아야 함)
+    """
+    subprocess.Popen([
+        exe,
+        "--disable-features=CalculateNativeWinOcclusion",
+        "--disable-backgrounding-occluded-windows",
+    ])
